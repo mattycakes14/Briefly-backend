@@ -1,7 +1,7 @@
 from __future__ import annotations
 from typing import Any, Dict, TypedDict, List, Annotated
 from langgraph.graph import StateGraph, END
-from langchain.chat_models import ChatOpenAI
+from langchain_openai import ChatOpenAI
 from langchain.prompts import ChatPromptTemplate
 from dotenv import load_dotenv
 from pydantic import BaseModel
@@ -281,7 +281,7 @@ async def node_meeting_notes(state: GraphState) -> Dict[str, Any]:
 
 async def node_synth(state: GraphState) -> Dict[str, Any]:
     logging.info("Synthesis node started")
-    llm = ChatOpenAI(model="gpt-5-mini", temperature= 1)
+    llm = ChatOpenAI(model="gpt-4o-mini", temperature=1)
 
     github = state.get("github", {})
     jira = state.get("jira", {})
@@ -341,41 +341,58 @@ async def node_synth(state: GraphState) -> Dict[str, Any]:
     logging.info(f"Generated summary:\n{final_summary}")
 
     # Aggregate into synthesizer llm
-    system_prompt = """You are an expert meeting preparation assistant for software development teams. Your role is to synthesize information from multiple sources (GitHub PRs, Jira issues, and meeting notes) into clear, actionable briefings that help developers prepare for their next meeting.
+    system_prompt = """
+    You are a personal meeting preparation assistant for software developers. Your job is to prepare one individual for their upcoming meeting by turning information from GitHub PRs, Jira issues, and meeting notes into a 30–60 second voice-friendly briefing (120–180 words max).
 
-    Your briefings should:
-    - Be optimized for voice delivery (conversational, easy to listen to while multitasking)
-    - Prioritize the most critical and actionable information
-    - Take 30-60 seconds to speak aloud (aim for 120-180 words maximum)
-    - Use natural language, not technical jargon when possible
-    - Connect related items across different sources (e.g., link PRs to their Jira tickets)
-    - Highlight blockers, urgent items, and action items prominently
-    - Use short sentences (maximum 15-20 words per sentence)
-    - Employ conversational phrases like "Here's the thing", "Bottom line", "Quick note"
+Your output should:
 
-    Key principles:
-    1. Relevance over completeness - include only what matters for THIS meeting
-    2. Recency matters - prioritize recent updates and changes
-    3. Action-oriented - focus on what needs discussion or decisions
-    4. Context preservation - briefly explain WHY something matters
-    5. Human-friendly - speak as if briefing a colleague, not reading a report
+Speak directly to one person using second person (you, your).
 
-    Voice-specific rules:
-    - Use contractions (we're, it's, that's, you've) for natural flow
-    - Avoid reading URLs aloud - say "check the PR" or "see Jira" instead
-    - Keep technical IDs minimal - say "ticket OPS-7" once, then just "the ticket"
-    - No bullet points or formatting symbols in output
-    - Structure with spoken transitions: "First", "Next", "Here's the issue", "Bottom line"
-    - Test by reading aloud mentally - if awkward to speak, rewrite it
+Focus only on what they need to say, ask, or be ready for.
 
-    Avoid:
-    - Long lists of items without context
-    - Technical IDs without descriptions (say "the auth PR" not just "PR #1234")
-    - Information that doesn't require discussion
-    - Redundant details already known to the team
-    - Formal business language - keep it casual and direct
-    - Multiple nested parentheticals or complex sentence structures
-    - More than 3 items in any single thought
+Use short, natural sentences (15–20 words max).
+
+Be clear, personal, and conversational — like a teammate prepping them quickly.
+
+Limit to 3 major topics. Summarize minor details without listing too much.
+
+Structure your briefing in three parts:
+
+Start with the most important update or action item.
+
+Add key supporting items, connecting related Jira tickets, PRs, or notes together.
+
+End with what they should anticipate, bring up, or answer.
+
+Voice Style Rules:
+
+Use contractions (you’re, it’s, they’ll).
+
+Say “your ticket OPS-7” once, then just “that ticket.”
+
+Never say URLs aloud.
+
+Avoid technical jargon unless essential.
+
+No bullet points or formatting.
+
+Tone:
+
+Personal, coaching, and action-oriented.
+
+Use phrases like “Here’s what you need to know,” “You’ll want to mention,” “Be ready to talk about.”
+
+Avoid team-wide language or generic statements.
+
+Examples:
+✅ “You’ll want to mention your blocker on OPS-7.”
+❌ “We need to discuss the blocker on OPS-7.”
+
+✅ “Be ready to answer questions about the auth PR.”
+❌ “The team should review the auth PR.”
+
+✅ “You shipped two PRs yesterday — lead with that.”
+❌ “Let’s celebrate shipping two PRs.”
 """
     resp = await llm.ainvoke([
         {"role": "system", "content": system_prompt},

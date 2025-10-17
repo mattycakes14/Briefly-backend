@@ -1,5 +1,5 @@
 from __future__ import annotations
-from typing import Any, Dict, TypedDict
+from typing import Any, Dict, TypedDict, List, Annotated
 from langgraph.graph import StateGraph, END
 from langchain.chat_models import ChatOpenAI
 from langchain.prompts import ChatPromptTemplate
@@ -8,6 +8,9 @@ from pydantic import BaseModel
 import logging
 import asyncio
 import json
+import operator
+from arcadepy import Arcade
+
 
 # initialize dotenv
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
@@ -15,17 +18,16 @@ logger = logging.getLogger(__name__)
 
 load_dotenv()
 
-# initialize openai client
+# initialize arcadepy client
+client = Arcade()  # Automatically finds the `ARCADE_API_KEY` env variable
 
 class GraphState(TypedDict, total=False):
     transcript: str
-    github: Dict[str, Any]
-    jira: Dict[str, Any]
+    github: Annotated[Dict[str, Any], operator.or_]  # Merge concurrent updates
+    jira: Annotated[Dict[str, Any], operator.or_]
     summary: str
     classification: Dict[str, Any]
-
-# TBD 
-# class ClassifyRequest(TypedDict, total=False):
+    targets: List[str]
     
 async def node_coordinator(state: GraphState) -> GraphState:
     # classify the request and execute certain nodes based on the classification
@@ -79,66 +81,188 @@ async def node_coordinator(state: GraphState) -> GraphState:
     except Exception:
         result = {"is_git": False, "is_jira": False, "is_meeting_notes": False}
         logging.error(f"Error parsing JSON: {e}")
+    
     state["classification"] = result
+    
+    # determine which nodes to run
+    cls = state.get("classification", {}) or {}
+    targets = []
+    if cls.get("is_git"): targets.append("github")
+    if cls.get("is_jira"): targets.append("jira")
+
+    if not targets:
+        targets.append("synth")
+
+    state["targets"] = targets
+
     return state
 
-async def node_github(state: GraphState) -> GraphState:
-    await asyncio.sleep(0.05)
-    state["github"] = {
-        "pull_requests": [
-            {"title": "Add summarizer endpoint", "status": "merged", "number": 42},
-            {"title": "Refactor auth middleware", "status": "open", "number": 57},
-        ],
+async def node_github(state: GraphState) -> Dict[str, Any]:
+    logging.info("GitHub node started")
+    return {
+        "github": {
+            "pull_requests": [
+                {"title": "Add summarizer endpoint", "status": "merged", "number": 42},
+                {"title": "Refactor auth middleware", "status": "open", "number": 57},
+            ],
+        }
     }
-    return state
 
 
-async def node_jira(state: GraphState) -> GraphState:
-    await asyncio.sleep(0.05)
-    state["jira"] = {
-        "assigned": [
-            {"key": "BRF-101", "title": "Voice wake word bug", "status": "In Progress"},
-            {"key": "BRF-88", "title": "Add meeting prep flow", "status": "Review"},
-        ],
-        "blockers": [
-            {"key": "BRF-77", "title": "Auth feature blocked by OAuth redirect", "owner": "sarah"},
-        ],
+async def node_jira(state: GraphState) -> Dict[str, Any]:
+    logging.info("Jira node started")
+    
+    # hardcoded for demo (input)
+    jira_website = "https://uw-team-eg624ru3.atlassian.net/rest/api/3/search"
+    assignee = "mlau191@uw.edu"
+    project = "briefly"
+    keyword = "bug"
+    atlassian_cloud_id = "a3c0ae94-18ac-4e5b-a511-6fa2460c8c35"
+    limit = 10
+    due_from = "2025-01-01"
+    status = "In Progress"
+
+    USER_ID = "mlau191@uw.edu"  # Unique identifier for your user (email, UUID, etc.)
+    TOOL_NAME = "Jira.GetIssuesWithoutId"
+
+    auth_response = client.tools.authorize(tool_name=TOOL_NAME, user_id=USER_ID)
+
+    if auth_response.status != "completed":
+        print(f"Click this link to authorize: {auth_response.url}")
+
+    # Wait for the authorization to complete
+    client.auth.wait_for_completion(auth_response)
+
+    tool_input = {
+        "status": status,
+        "assignee": assignee,
+        "project": project,
+        "limit": limit,
+        "atlassian_cloud_id": atlassian_cloud_id,
     }
-    return state
+
+    response = client.tools.execute(
+        tool_name=TOOL_NAME,
+        input=tool_input,
+        user_id=USER_ID,
+    )
+    final_response = response.output.value  # Already a dict, no need for json.dumps
+    logging.info(f"Jira response: {json.dumps(final_response)}")  # Log as JSON string for readability
+
+    # parse the response
+    parsed = []
+
+    issues = final_response.get("issues", [])
+    for issue in issues:
+        # Basic info
+        key = issue["key"]                           # "OPS-5"
+        title = issue["title"]                       # "(Sample) Credit Card Payment"
+        status = issue["status"]["name"]             # "In Progress"
+        
+        # Priority (can be null)
+        priority = issue.get("priority")
+        priority_name = priority["name"] if priority else "No Priority"
+        
+        # Assignee
+        assignee = issue["assignee"]
+        assignee_name = assignee["name"]             # "Matt Lau"
+        assignee_email = assignee["email"]           # "mlau191@uw.edu"
+        
+        # Description (HTML format)
+        description = issue["description"]           # "<p>Create a secure payment...</p>"
+        
+        # Parent Epic (can be null)
+        parent = issue.get("parent")
+        parent_key = parent["key"] if parent else None      # "OPS-2"
+        parent_title = parent["title"] if parent else None  # "(Sample) Payment Processing"
+        
+        # Dates
+        created = issue["created"]                   # "2025-10-16T18:50:36.559-0700"
+        
+        # URLs
+        jira_url = issue["jira_gui_url"]            # Direct link to issue
+        
+        # Project
+        project_name = issue["project"]["name"]      # "briefly"
+        project_key = issue["project"]["key"]        # "OPS"
+        
+        # Build clean dict
+        parsed.append({
+            "key": key,
+            "title": title,
+            "status": status,
+            "priority": priority_name,
+            "assignee": assignee_name,
+            "description": description,
+            "parent_epic": parent_key,
+            "created": created,
+            "url": jira_url
+        })
+    
+    return {
+        "jira": {"issues": parsed}  # Wrap list in dict for consistent state shape
+    }
 
 
-async def node_synth(state: GraphState) -> GraphState:
+async def node_synth(state: GraphState) -> Dict[str, Any]:
+    logging.info("Synthesis node started")
     github = state.get("github", {})
     jira = state.get("jira", {})
     transcript = state.get("transcript")
-    recent_prs = ", ".join(pr["title"] for pr in github.get("pull_requests", [])[:2])
-    assigned = ", ".join(i["key"] for i in jira.get("assigned", [])[:2])
-    top_blocker = (jira.get("blockers", [{}]) or [{}])[0].get("title", "None")
-    base = (
-        f"GitHub PRs: {recent_prs or 'none'}. "
-        f"Jira assigned: {assigned or 'none'}. Top blocker: {top_blocker}."
-    )
+
+    # Format jira issues
+    jira_issues = jira.get("issues", []) if jira else []
+    jira_summary = ", ".join([f"{i['key']}: {i['title']}" for i in jira_issues[:3]]) if jira_issues else "none"
+    
+    # Format github (assuming similar structure if you add it)
+    github_summary = f"{len(github)} items" if github else "none"
+
+    base = f"Jira: {jira_summary}. GitHub: {github_summary}."
     if transcript:
         base += f" Transcript: {transcript}"
-    state["summary"] = base
-    return state
+
+    return {"summary": base.strip()}
+
+
+def select_targets(state: GraphState) -> list[str]:
+    """Return list of target nodes based on classification."""
+    cls = state.get("classification", {}) or {}
+    targets = []
+    if cls.get("is_git"):
+        targets.append("github")
+    if cls.get("is_jira"):
+        targets.append("jira")
+    # If nothing selected, go straight to synth
+    if not targets:
+        targets.append("synth")
+    return targets
 
 
 def build_meeting_prep_graph():
     graph = StateGraph(GraphState)
     graph.add_node("coordinator", node_coordinator)
-    # graph.add_node("github", node_github)
-    # graph.add_node("jira", node_jira)
-    # graph.add_node("synth", node_synth)
+    graph.add_node("github", node_github)
+    graph.add_node("jira", node_jira)
+    graph.add_node("synth", node_synth)
 
-    # # Run data fetch nodes in parallel, then synth
-    graph.set_entry_point("coordinator")
-    # graph.add_edge("coordinator", "github")
-    # graph.add_edge("coordinator", "jira")
-    # graph.add_edge("github", "synth")
-    # graph.add_edge("jira", "synth")
-    # graph.add_edge("synth", END)
-    graph.add_edge("coordinator", END)
+    graph.set_entry_point("jira")
+    
+    # Conditional fan-out based on classification
+    graph.add_conditional_edges(
+        "coordinator",
+        select_targets,
+        {
+            "github": "github",
+            "jira": "jira",
+            "synth": "synth",
+        }
+    )
+    
+    # Join at synth
+    graph.add_edge("github", "synth")
+    graph.add_edge("jira", "synth")
+    graph.add_edge("synth", END)
+    
     return graph.compile()
 
 

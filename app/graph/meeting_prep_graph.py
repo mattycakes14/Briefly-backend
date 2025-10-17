@@ -12,15 +12,21 @@ import operator
 from arcadepy import Arcade
 from langchain_anthropic import ChatAnthropic
 
-llm_synthesis = ChatAnthropic(model="claude-3-5-sonnet-20240620", temperature=0)
-# initialize dotenv
+# initialize dotenv first (before any other imports that need env vars)
+load_dotenv()
+
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
 
-load_dotenv()
+# Lazy initialization - create client only when needed
+_arcade_client = None
 
-# initialize arcadepy client
-client = Arcade()  # Automatically finds the `ARCADE_API_KEY` env variable
+def get_arcade_client():
+    """Lazy initialization of Arcade client to avoid import-time errors"""
+    global _arcade_client
+    if _arcade_client is None:
+        _arcade_client = Arcade()
+    return _arcade_client
 
 class GraphState(TypedDict, total=False):
     transcript: str
@@ -109,6 +115,8 @@ async def node_github(state: GraphState) -> Dict[str, Any]:
     repo = "react"
     state = "open"
 
+    client = get_arcade_client()
+    
     auth_response = client.tools.authorize(
         tool_name=TOOL_NAME,
         user_id=USER_ID,
@@ -168,6 +176,8 @@ async def node_jira(state: GraphState) -> Dict[str, Any]:
     USER_ID = "mlau191@uw.edu"  # Unique identifier for your user (email, UUID, etc.)
     TOOL_NAME = "Jira.GetIssuesWithoutId"
 
+    client = get_arcade_client()
+    
     auth_response = client.tools.authorize(tool_name=TOOL_NAME, user_id=USER_ID)
 
     if auth_response.status != "completed":
@@ -252,6 +262,8 @@ async def node_meeting_notes(state: GraphState) -> Dict[str, Any]:
     USER_ID = "mlau191@uw.edu"
     TOOL_NAME = "NotionToolkit.GetPageContentByTitle"
 
+    client = get_arcade_client()
+    
     auth_response = client.tools.authorize(
         tool_name=TOOL_NAME,
         user_id=USER_ID,

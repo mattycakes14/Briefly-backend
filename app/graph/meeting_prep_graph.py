@@ -9,6 +9,7 @@ import logging
 import asyncio
 import json
 import operator
+import re
 from arcadepy import Arcade
 from langchain_anthropic import ChatAnthropic
 
@@ -187,7 +188,6 @@ async def node_jira(state: GraphState) -> Dict[str, Any]:
     client.auth.wait_for_completion(auth_response)
 
     tool_input = {
-        "status": status,
         "assignee": assignee,
         "project": project,
         "limit": limit,
@@ -309,6 +309,12 @@ async def node_synth(state: GraphState) -> Dict[str, Any]:
             for idx, pr in enumerate(pr_list, 1):
                 lines.append(f"  {idx}. PR #{pr['number']}: {pr['title']}")
                 lines.append(f"     State: {pr['state']}, Author: {pr['user']}")
+                # Extract and include the body (description) - this is critical context
+                body = pr.get('body', '').strip()
+                if body:
+                    # Truncate if too long, but keep enough for context
+                    body_preview = body[:300] + '...' if len(body) > 300 else body
+                    lines.append(f"     Description: {body_preview}")
                 lines.append(f"     URL: {pr['html_url']}")
             github_string = "\n".join(lines)
         else:
@@ -326,6 +332,14 @@ async def node_synth(state: GraphState) -> Dict[str, Any]:
                 lines.append(f"  {idx}. {issue['key']}: {issue['title']}")
                 lines.append(f"     Status: {issue['status']}, Priority: {issue['priority']}")
                 lines.append(f"     Assignee: {issue['assignee']}")
+                # Extract and include the description - this is critical context
+                description = issue.get('description', '').strip()
+                if description:
+                    # Remove HTML tags for better readability
+                    description_clean = re.sub('<[^<]+?>', '', description)
+                    # Truncate if too long
+                    desc_preview = description_clean[:300] + '...' if len(description_clean) > 300 else description_clean
+                    lines.append(f"     Description: {desc_preview}")
                 if issue.get('parent_epic'):
                     lines.append(f"     Epic: {issue['parent_epic']}")
                 lines.append(f"     URL: {issue['url']}")
@@ -358,7 +372,7 @@ async def node_synth(state: GraphState) -> Dict[str, Any]:
 
         Your output should:
 
-        Speak directly to one person using second person (you, your).
+        Speak directly to one person using second person (you, your) and you can use names of people.
 
         Focus only on what they need to say, ask, or be ready for.
 
@@ -368,19 +382,21 @@ async def node_synth(state: GraphState) -> Dict[str, Any]:
 
         Limit to 3 major topics. Summarize minor details without listing too much.
 
+        IMPORTANT: Use the Description field from PRs and Jira tickets to understand context and provide meaningful insights. The descriptions contain critical details about what the work is about, blockers, and goals.
+
         Structure your briefing in three parts:
 
         Start with the most important update or action item.
 
-        Add key supporting items, connecting related Jira tickets, PRs, or notes together.
+        Add key supporting items, connecting related Jira tickets, PRs, or notes together. Reference what the work is about based on descriptions.
 
         End with what they should anticipate, bring up, or answer.
 
         Voice Style Rules:
 
-        Use contractions (you’re, it’s, they’ll).
+        Use contractions (you're, it's, they'll).
 
-        Say “your ticket OPS-7” once, then just “that ticket.”
+        Say "your ticket OPS-7" once, then just "that ticket."
 
         Never say URLs aloud.
 
@@ -392,19 +408,19 @@ async def node_synth(state: GraphState) -> Dict[str, Any]:
 
         Personal, coaching, and action-oriented.
 
-        Use phrases like “Here’s what you need to know,” “You’ll want to mention,” “Be ready to talk about.”
+        Use phrases like "Here's what you need to know," "You'll want to mention," "Be ready to talk about."
 
         Avoid team-wide language or generic statements.
 
         Examples:
-        ✅ “You’ll want to mention your blocker on OPS-7.”
-        ❌ “We need to discuss the blocker on OPS-7.”
+        ✅ "You'll want to mention your blocker on OPS-7."
+        ❌ "We need to discuss the blocker on OPS-7."
 
-        ✅ “Be ready to answer questions about the auth PR.”
-        ❌ “The team should review the auth PR.”
+        ✅ "Be ready to answer questions about the auth PR."
+        ❌ "The team should review the auth PR."
 
-        ✅ “You shipped two PRs yesterday — lead with that.”
-        ❌ “Let’s celebrate shipping two PRs.”
+        ✅ "You shipped two PRs yesterday — lead with that."
+        ❌ "Let's celebrate shipping two PRs."
     """
     resp = await llm.ainvoke([
         {"role": "system", "content": system_prompt},
@@ -452,6 +468,7 @@ def build_meeting_prep_graph():
     )
     
     # Join at synth
+
     graph.add_edge("github", "synth")
     graph.add_edge("jira", "synth")
     graph.add_edge("meeting_notes", "synth")

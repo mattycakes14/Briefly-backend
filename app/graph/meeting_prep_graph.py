@@ -28,6 +28,7 @@ class GraphState(TypedDict, total=False):
     summary: str
     classification: Dict[str, Any]
     targets: List[str]
+    meeting_notes: Dict[str, Any]
     
 async def node_coordinator(state: GraphState) -> GraphState:
     # classify the request and execute certain nodes based on the classification
@@ -99,13 +100,54 @@ async def node_coordinator(state: GraphState) -> GraphState:
 
 async def node_github(state: GraphState) -> Dict[str, Any]:
     logging.info("GitHub node started")
+
+    # configuration (facebook repo)
+    USER_ID = "mlau191@uw.edu"
+    TOOL_NAME = "Github.ListPullRequests"
+    owner = "facebook"
+    repo = "react"
+    state = "open"
+
+    auth_response = client.tools.authorize(
+        tool_name=TOOL_NAME,
+        user_id=USER_ID,
+    )
+    if auth_response.status != "completed":
+        print(f"Click this link to authorize: {auth_response.url}")
+    
+    
+    client.auth.wait_for_completion(auth_response)
+    tool_input = {
+        "owner": owner,
+        "repo": repo,
+        "state": state,
+        "per_page": 5,
+    }
+    response = client.tools.execute(
+        tool_name=TOOL_NAME,
+        input=tool_input,
+        user_id=USER_ID,
+    )
+
+    github_data = response.output.value
+    
+    # Parse if it's a JSON string
+    if isinstance(github_data, str):
+        github_data = json.loads(github_data)
+    
+    # Fallback to empty dict if null/None
+    if github_data is None:
+        github_data = {"pull_requests": []}
+    
+    logging.info(f"GitHub response parsed successfully")
+    logging.info(f"Total PRs found: {len(github_data.get('pull_requests', []))}")
+    
+    # Log each PR
+    for pr in github_data.get('pull_requests', []):
+        logging.info(f"PR #{pr['number']}: {pr['title']} (State: {pr['state']})")
+    
     return {
-        "github": {
-            "pull_requests": [
-                {"title": "Add summarizer endpoint", "status": "merged", "number": 42},
-                {"title": "Refactor auth middleware", "status": "open", "number": 57},
-            ],
-        }
+        "github": github_data
     }
 
 
@@ -199,10 +241,42 @@ async def node_jira(state: GraphState) -> Dict[str, Any]:
             "url": jira_url
         })
     
+    logging.info(f"Parsed {len(parsed)} Jira issues")
+    
     return {
-        "jira": {"issues": parsed}  # Wrap list in dict for consistent state shape
+        "jira": {"issues": parsed}
     }
 
+async def node_meeting_notes(state: GraphState) -> Dict[str, Any]:
+    USER_ID = "mlau191@uw.edu"
+    TOOL_NAME = "NotionToolkit.GetPageContentByTitle"
+
+    auth_response = client.tools.authorize(
+        tool_name=TOOL_NAME,
+        user_id=USER_ID,
+    )
+
+    if auth_response.status != "completed":
+        print(f"Click this link to authorize: {auth_response.url}")
+
+    # Wait for the authorization to complete
+    client.auth.wait_for_completion(auth_response)
+
+    tool_input = {
+        "title": "Meeting Notes"
+    }
+
+    response = client.tools.execute(
+        tool_name=TOOL_NAME,
+        input=tool_input,
+        user_id=USER_ID,
+    )
+    meeting_notes = response.output.value
+    logging.info(f"Meeting notes: {meeting_notes}")
+
+    return {
+        "meeting_notes": meeting_notes
+    }
 
 async def node_synth(state: GraphState) -> Dict[str, Any]:
     logging.info("Synthesis node started")
@@ -210,19 +284,54 @@ async def node_synth(state: GraphState) -> Dict[str, Any]:
     jira = state.get("jira", {})
     transcript = state.get("transcript")
 
-    # Format jira issues
-    jira_issues = jira.get("issues", []) if jira else []
-    jira_summary = ", ".join([f"{i['key']}: {i['title']}" for i in jira_issues[:3]]) if jira_issues else "none"
+    # Format GitHub PRs into a readable string
+    github_string = ""
+    if github:
+        pr_list = github.get("pull_requests", [])
+        if pr_list:
+            lines = [f"GitHub - Found {len(pr_list)} pull request(s):"]
+            for idx, pr in enumerate(pr_list, 1):
+                lines.append(f"  {idx}. PR #{pr['number']}: {pr['title']}")
+                lines.append(f"     State: {pr['state']}, Author: {pr['user']}")
+                lines.append(f"     URL: {pr['html_url']}")
+            github_string = "\n".join(lines)
+        else:
+            github_string = "GitHub - No pull requests found."
+    else:
+        github_string = "GitHub - No data available."
     
-    # Format github (assuming similar structure if you add it)
-    github_summary = f"{len(github)} items" if github else "none"
+    # Format Jira issues into a readable string
+    jira_string = ""
+    if jira:
+        jira_issues = jira.get("issues", [])
+        if jira_issues:
+            lines = [f"Jira - Found {len(jira_issues)} issue(s):"]
+            for idx, issue in enumerate(jira_issues, 1):
+                lines.append(f"  {idx}. {issue['key']}: {issue['title']}")
+                lines.append(f"     Status: {issue['status']}, Priority: {issue['priority']}")
+                lines.append(f"     Assignee: {issue['assignee']}")
+                if issue.get('parent_epic'):
+                    lines.append(f"     Epic: {issue['parent_epic']}")
+                lines.append(f"     URL: {issue['url']}")
+            jira_string = "\n".join(lines)
+        else:
+            jira_string = "Jira - No issues found."
+    else:
+        jira_string = "Jira - No data available."
+    
+    # Combine everything into a summary
+    summary_parts = []
+    summary_parts.append(f"Meeting Prep Summary for: '{transcript}'\n")
+    summary_parts.append("=" * 50)
+    if github_string:
+        summary_parts.append(github_string)
+    if jira_string:
+        summary_parts.append(jira_string)
+    
+    final_summary = "\n\n".join(summary_parts)
+    logging.info(f"Generated summary:\n{final_summary}")
 
-    base = f"Jira: {jira_summary}. GitHub: {github_summary}."
-    if transcript:
-        base += f" Transcript: {transcript}"
-
-    return {"summary": base.strip()}
-
+    return {"summary": final_summary}
 
 def select_targets(state: GraphState) -> list[str]:
     """Return list of target nodes based on classification."""
@@ -232,6 +341,9 @@ def select_targets(state: GraphState) -> list[str]:
         targets.append("github")
     if cls.get("is_jira"):
         targets.append("jira")
+    if cls.get("is_meeting_notes"):
+        targets.append("meeting_notes")
+
     # If nothing selected, go straight to synth
     if not targets:
         targets.append("synth")
@@ -244,8 +356,9 @@ def build_meeting_prep_graph():
     graph.add_node("github", node_github)
     graph.add_node("jira", node_jira)
     graph.add_node("synth", node_synth)
+    graph.add_node("meeting_notes", node_meeting_notes)
 
-    graph.set_entry_point("jira")
+    graph.set_entry_point("meeting_notes")
     
     # Conditional fan-out based on classification
     graph.add_conditional_edges(
@@ -255,12 +368,14 @@ def build_meeting_prep_graph():
             "github": "github",
             "jira": "jira",
             "synth": "synth",
+            "meeting_notes": "meeting_notes",
         }
     )
     
     # Join at synth
     graph.add_edge("github", "synth")
     graph.add_edge("jira", "synth")
+    graph.add_edge("meeting_notes", "synth")
     graph.add_edge("synth", END)
     
     return graph.compile()

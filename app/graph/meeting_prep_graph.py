@@ -10,8 +10,9 @@ import asyncio
 import json
 import operator
 from arcadepy import Arcade
+from langchain_anthropic import ChatAnthropic
 
-
+llm_synthesis = ChatAnthropic(model="claude-3-5-sonnet-20240620", temperature=0)
 # initialize dotenv
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
@@ -280,9 +281,12 @@ async def node_meeting_notes(state: GraphState) -> Dict[str, Any]:
 
 async def node_synth(state: GraphState) -> Dict[str, Any]:
     logging.info("Synthesis node started")
+    llm = ChatOpenAI(model="gpt-5-mini", temperature= 1)
+
     github = state.get("github", {})
     jira = state.get("jira", {})
     transcript = state.get("transcript")
+    meeting_notes = state.get("meeting_notes")
 
     # Format GitHub PRs into a readable string
     github_string = ""
@@ -328,10 +332,37 @@ async def node_synth(state: GraphState) -> Dict[str, Any]:
     if jira_string:
         summary_parts.append(jira_string)
     
+    if meeting_notes:
+        summary_parts.append(meeting_notes)
+    else:
+        summary_parts.append("Meeting notes - No data available.")
+    
     final_summary = "\n\n".join(summary_parts)
     logging.info(f"Generated summary:\n{final_summary}")
 
-    return {"summary": final_summary}
+    # Aggregate into synthesizer llm
+    system_prompt = """You are an expert meeting preparation assistant for software development teams. Your role is to synthesize information from multiple sources (GitHub PRs, Jira issues, and meeting notes) into clear, actionable briefings that help developers prepare for their next meeting.
+        Your briefings should:
+        - Be optimized for voice delivery (conversational, easy to listen to while multitasking)
+        - Prioritize the most critical and actionable information
+        - Take 30-60 seconds to speak aloud
+        - Use natural language, not technical jargon when possible
+        - Connect related items across different sources (e.g., link PRs to their Jira tickets)
+        - Highlight blockers, urgent items, and action items prominently
+        - Be structured and scannable with clear sections
+
+        Key principles:
+        1. Relevance over completeness - include only what matters for THIS meeting
+        2. Recency matters - prioritize recent updates and changes
+        3. Action-oriented - focus on what needs discussion or decisions
+        4. Context preservation - briefly explain WHY something matters
+        5. Human-friendly - speak as if briefing a colleague, not reading a report
+"""
+    resp = await llm.ainvoke([
+        {"role": "system", "content": system_prompt},
+        {"role": "user", "content": final_summary}
+    ])
+    return {"summary": resp.content}
 
 def select_targets(state: GraphState) -> list[str]:
     """Return list of target nodes based on classification."""
@@ -358,7 +389,7 @@ def build_meeting_prep_graph():
     graph.add_node("synth", node_synth)
     graph.add_node("meeting_notes", node_meeting_notes)
 
-    graph.set_entry_point("meeting_notes")
+    graph.set_entry_point("coordinator")
     
     # Conditional fan-out based on classification
     graph.add_conditional_edges(
